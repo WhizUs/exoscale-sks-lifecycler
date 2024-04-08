@@ -79,7 +79,15 @@ func initConfig() {
 		viper.SetConfigName(".exoscale-sks-lifecycler")
 	}
 
+	viper.SetEnvPrefix("exoscale_sks_lifecycler") // will be uppercased automatically
+
 	viper.AutomaticEnv() // read in environment variables that match
+
+	viper.BindEnv("exoscale_api_key", "EXOSCALE_API_KEY")
+	viper.BindEnv("exoscale_api_secret", "EXOSCALE_API_SECRET")
+	viper.BindEnv("exoscale_api_zone", "EXOSCALE_API_ZONE")
+	viper.BindEnv("exoscale_api_endpoint", "EXOSCALE_API_ENDPOINT")
+	viper.BindEnv("kubeconfig", "KUBECONFIG")
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
