@@ -2,14 +2,15 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
-	"encoding/json"
 
+	corev1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 
 	egoscalev2 "github.com/exoscale/egoscale/v2"
@@ -20,7 +21,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const nodeLabelNodepoolId string = "node.exoscale.net/nodepool-id"
+const (
+	nodeLabelNodepoolId string = "node.exoscale.net/nodepool-id"
+)
 
 func initKubeClient() (*kubernetes.Clientset, error) {
 	var kubeconfigPath string
@@ -79,29 +82,61 @@ func cordonNode(clientset *kubernetes.Clientset, nodeName string, unschedulable 
 	return nil
 }
 
-func evictPods(clientset *kubernetes.Clientset, nodeName string) error {
-	pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
-		FieldSelector: "spec.nodeName=" + nodeName,
-	})
+func evictPod(clientset *kubernetes.Clientset, pod corev1.Pod) error {
+	if err := clientset.CoreV1().Pods(pod.Namespace).Evict(context.Background(), &policyv1beta1.Eviction{
+		ObjectMeta:    metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name},
+		DeleteOptions: &metav1.DeleteOptions{},
+	}); err != nil && !errors.IsNotFound(err) {
+		fmt.Printf("Error evicting pod: %v\n", err)
+		return err
+	}
+	fmt.Printf("Pod %s/%s evicted\n", pod.Namespace, pod.Name)
+
+	return nil
+}
+
+// restartDeployment restarts the deployment of a pod
+func restartDeployment(clientset *kubernetes.Clientset, pod corev1.Pod) error {
+	podOwnerRef := metav1.GetControllerOf(&pod)
+	if podOwnerRef == nil {
+		return fmt.Errorf("pod %s/%s has no owner", pod.Namespace, pod.Name)
+	}
+
+	replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
 	if err != nil {
+		fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
 		return err
 	}
 
-	for _, pod := range pods.Items {
-		if pod.DeletionTimestamp != nil {
-			fmt.Printf("Pod %s/%s is already terminating\n", pod.Namespace, pod.Name)
-			continue
-		}
+	replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
+	if replicaSetOwnerRef == nil {
+		fmt.Printf("ReplicaSet %s/%s has no owner\n", pod.Namespace, replicaSet.Name)
+		return err
+	}
 
-		if err := clientset.CoreV1().Pods(pod.Namespace).Evict(context.Background(), &policyv1beta1.Eviction{
-			ObjectMeta:    metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name},
-			DeleteOptions: &metav1.DeleteOptions{},
-		}); err != nil && !errors.IsNotFound(err) {
-			fmt.Printf("Error evicting pod: %v\n", err)
-			continue
+	deployment, err := clientset.AppsV1().Deployments(pod.Namespace).Get(context.Background(), replicaSetOwnerRef.Name, metav1.GetOptions{})
+	if err != nil {
+		fmt.Printf("Error getting deployment %s/%s: %v\n", pod.Namespace, replicaSetOwnerRef.Name, err)
+		return err
+	}
+
+	data := fmt.Sprintf(`{"spec": {"template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "%s"}}}}}`, time.Now().Format("20060102150405"))
+	result, err := clientset.AppsV1().Deployments(deployment.Namespace).Patch(context.Background(), deployment.Name, types.StrategicMergePatchType, []byte(data), metav1.PatchOptions{})
+	if err != nil {
+		fmt.Printf("Error patching deployment %s/%s, result: %s, %v\n", deployment.Namespace, deployment.Name, result, err)
+		return err
+	}
+
+	// Wait for pod to terminate
+	for {
+		_, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+			fmt.Printf("Pod %s/%s has terminated: %v\n", pod.Namespace, pod.Name, err)
+			break
+		} else {
+			fmt.Printf("Pod %s/%s is still running\n", pod.Namespace, pod.Name)
+			time.Sleep(15 * time.Second)
 		}
-		fmt.Printf("Pod %s/%s evicted\n", pod.Namespace, pod.Name)
-		time.Sleep(150 * time.Millisecond) // Sleep to avoid overwhelming the API server
 	}
 
 	return nil
@@ -141,7 +176,7 @@ func getNodepool(egoclient *egoscalev2.Client, ctx context.Context, sksClusterId
 }
 
 // Scale the nodepool of the selected node
-func scaleNodepool(egoclient *egoscalev2.Client, ctx context.Context, node corev1.Node, sksClusterId string, sksNodepoolId string) error {
+func scaleNodepool(egoclient *egoscalev2.Client, ctx context.Context, _ corev1.Node, sksClusterId string, sksNodepoolId string) error {
 
 	// Get nodepool of the selected node
 	sksNodepool, err := getNodepool(egoclient, ctx, sksClusterId, sksNodepoolId)
@@ -180,12 +215,10 @@ func nodeHasRunningJobs(clientset *kubernetes.Clientset, nodeName string) (bool,
 	return false, nil
 }
 
-// Wait until pods matching a given labelSelector are healthy in the cluster
-func waitPodsRunning(clientset *kubernetes.Clientset, labelSelector string) error {
-	fmt.Printf("Waiting for pods with labelSelector '%s' to be running...\n", labelSelector)
-	pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
+// Wait until pods are healthy in the cluster
+func waitPodsRunning(clientset *kubernetes.Clientset) error {
+	fmt.Printf("Waiting for pods to be running.\n")
+	pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}

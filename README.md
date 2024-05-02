@@ -14,7 +14,6 @@ Lifecycle automation of Exoscale SKS cluster nodes.
 | `KUBECONFIG`                                | `/path/to/kubeconfig.yaml`       |
 | `EXOSCALE_SKS_LIFECYCLER_DESIRED_K8S_VERSION` | `v1.28.7`                      |
 | `EXOSCALE_SKS_LIFECYCLER_SKS_CLUSTER_ID`    | `905ff...`                       |
-| `EXOSCALE_SKS_LIFECYCLER_WAIT_FOR_PODS_LABEL_SELECTOR` | `"app in (frontend,backend)"` |
 
 ### Run
 

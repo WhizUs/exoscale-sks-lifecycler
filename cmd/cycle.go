@@ -21,9 +21,12 @@ var cycleCmd = &cobra.Command{
 	Long: `Replace all nodes in a nodepool. The procedure is as follows:
 - Scale the nodepool up by one node (by default all nodes and nodepools are considered).
 - Wait for the new node to be added to the nodepool.
-- Cordon the node, and evict all pods from the node.
+- Cordon the node.
+- Pods that are managed by daemonsets are skipped.
+- Pods that are managed by deployments are rescheduled by restarting the deployment.
+- Evict all remaining pods from the node.
 - Evict the node from the nodepool.
-- Wait for the pods (matching a specified label selector) to be running on other nodes.
+- Wait for the pods to be running on other nodes.
 
 The procedure is repeated for all nodes in the nodepool.
 Nodes which have job pods running are cordoned, but the eviction is skipped.`,
@@ -31,7 +34,6 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 		desiredK8sVersion := viper.GetString("desired_k8s_version")
 		exoscaleZone := viper.GetString("exoscale_api_zone")
 		sksClusterId := viper.GetString("sks_cluster_id")
-		podLabelSelector := viper.GetString("wait_for_pods_label_selector")
 
 
 		ctx := context.Background()
@@ -117,7 +119,7 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 				fmt.Printf("Error while cordoning node: %s", err)
 			}
 
-			// If the node has running jobs, skip it
+			// If the node has running jobs, continue to the next node
 			hasRunningJobs, err := nodeHasRunningJobs(clientset, node.Name)
 			if err != nil {
 				fmt.Printf("Error while checking if node has running jobs: %s", err)
@@ -127,8 +129,52 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 				continue
 			}
 
-			if err := evictPods(clientset, node.Name); err != nil {
-				fmt.Printf("Error while evicting pods: %s", err)
+			pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
+				FieldSelector: "spec.nodeName=" + node.Name,
+			})
+			if err != nil {
+				panic(err.Error())
+			}
+		
+			for _, pod := range pods.Items {
+				if pod.DeletionTimestamp != nil {
+					fmt.Printf("Pod %s/%s is already terminating\n", pod.Namespace, pod.Name)
+					continue
+				}
+
+				podOwnerRef := metav1.GetControllerOf(&pod)
+				if podOwnerRef == nil {
+					fmt.Printf("pod %s/%s has no owner", pod.Namespace, pod.Name)
+				} else {
+					if podOwnerRef.Kind == "DaemonSet" {
+						fmt.Printf("Pod %s/%s is managed by a DaemonSet, skipping eviction\n", pod.Namespace, pod.Name)
+						continue
+					}
+
+					if podOwnerRef.Kind == "ReplicaSet" {
+						replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
+						if err != nil {
+							fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
+						}
+					
+						replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
+						if replicaSetOwnerRef.Kind == "Deployment" {
+							if err := restartDeployment(clientset, pod); err != nil {
+								fmt.Printf("Error while restarting deployment: %s", err)
+							}
+
+							continue
+						}
+					}
+				}
+
+				if err := evictPod(clientset, pod); err != nil {
+					fmt.Printf("Error while evicting pod: %s", err)
+				}
+			}
+
+			if err := waitPodsRunning(clientset); err != nil {
+				fmt.Printf("Error while waiting for pods to be running: %s", err)
 			}
 
 			if err := egoclient.EvictSKSNodepoolMembers(ctx, exoscaleZone, sksCluster, &sksNodepool, []string{node.Status.NodeInfo.SystemUUID}); err != nil {
@@ -136,7 +182,7 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 			}
 			fmt.Printf("Node %s evicted from nodepool %s\n", node.Name, sksNodepoolId)
 
-			if err := waitPodsRunning(clientset, podLabelSelector); err != nil {
+			if err := waitPodsRunning(clientset); err != nil {
 				fmt.Printf("Error while waiting for pods to be running: %s", err)
 			}
 		}
