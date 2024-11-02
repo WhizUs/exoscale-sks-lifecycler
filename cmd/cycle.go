@@ -34,6 +34,7 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 		desiredK8sVersion := viper.GetString("desired_k8s_version")
 		exoscaleZone := viper.GetString("exoscale_api_zone")
 		sksClusterId := viper.GetString("sks_cluster_id")
+		evictNodesLabelSelector := viper.GetString("evict_nodes_labelselector")
 
 
 		ctx := context.Background()
@@ -61,14 +62,34 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 			panic(err.Error())
 		}
 
+		evictNodesLabels := parseLabelSelector(evictNodesLabelSelector)
+
 		// Iterate over all nodes
 		for _, node := range nodes.Items {
+			var hasDesiredVersion bool = false
 			if node.Status.NodeInfo.KubeletVersion == desiredK8sVersion {
 				fmt.Printf("Node %s is already on desired version %s\n", node.Name, node.Status.NodeInfo.KubeletVersion)
-				continue
-			} else {
-				fmt.Printf("Node %s is currently on version %s\n", node.Name, node.Status.NodeInfo.KubeletVersion)
+				hasDesiredVersion = true
+			} else {				
+				fmt.Printf("Node %s is not on desired version\n", node.Name)
 			}
+			
+			var isSelectedForEvictionDueToLabels bool = false
+			for key, value := range evictNodesLabels {
+				if nodeValue, exists := node.Labels[key]; exists && nodeValue == value {
+					fmt.Printf("Node %s is selected for eviction due to evictNodesLabelSelector config.\n", node.Name)
+					isSelectedForEvictionDueToLabels = true
+					break
+				}
+			}
+	
+			if !hasDesiredVersion || (hasDesiredVersion && isSelectedForEvictionDueToLabels) {
+				// Proceed with the operation
+			} else {
+				continue
+			}
+		
+			fmt.Printf("Node %s is currently on version %s\n", node.Name, node.Status.NodeInfo.KubeletVersion)
 
 			sksNodepoolId, err := getNodepoolId(node)
 			if err != nil {

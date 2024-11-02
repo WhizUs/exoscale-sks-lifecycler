@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -305,4 +306,21 @@ func kubeSystemPodsReady(clientset *kubernetes.Clientset, nodeName string) bool 
 // Check if a pod is running
 func PodRunningOrSucceeded(pod corev1.Pod) bool {
 	return (pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodSucceeded)
+}
+
+func parseLabelSelector(labelSelector string) map[string]string {
+	labels := make(map[string]string)
+	
+	// Split the input by commas to get individual key-value pairs
+	pairs := strings.Split(labelSelector, ",")
+	for _, pair := range pairs {
+			// Split each pair by '=' to separate key and value
+			kv := strings.SplitN(pair, "=", 2)
+			if len(kv) == 2 {
+					key := strings.TrimSpace(kv[0])
+					value := strings.TrimSpace(kv[1])
+					labels[key] = value
+			}
+	}
+	return labels
 }
