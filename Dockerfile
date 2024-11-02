@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.23.2-alpine3.20 AS builder
+FROM golang:1.21.9-alpine3.19 AS builder
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ COPY ./ ./
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /exoscale-sks-lifecycler
 
-FROM alpine:3.20.3 AS production
+FROM alpine:3.19.1 AS production
 
 LABEL org.opencontainers.image.source="https://github.com/WhizUs/exoscale-sks-lifecycler" \
     org.opencontainers.image.url="https://github.com/WhizUs/exoscale-sks-lifecycler" \
