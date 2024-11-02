@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -96,29 +97,35 @@ func evictPod(clientset *kubernetes.Clientset, pod corev1.Pod) error {
 }
 
 // restartDeployment restarts the deployment of a pod
-func restartDeployment(clientset *kubernetes.Clientset, pod corev1.Pod) error {
-	podOwnerRef := metav1.GetControllerOf(&pod)
-	if podOwnerRef == nil {
-		return fmt.Errorf("pod %s/%s has no owner", pod.Namespace, pod.Name)
-	}
+func restartDeployment(clientset *kubernetes.Clientset, deployment appsv1.Deployment) error {
+	// podOwnerRef := metav1.GetControllerOf(&pod)
+	// if podOwnerRef == nil {
+	// 	return fmt.Errorf("pod %s/%s has no owner", pod.Namespace, pod.Name)
+	// }
 
-	replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
-	if err != nil {
-		fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
-		return err
-	}
+	// replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
+	// if err != nil {
+	// 	fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
+	// 	return err
+	// }
 
-	replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
-	if replicaSetOwnerRef == nil {
-		fmt.Printf("ReplicaSet %s/%s has no owner\n", pod.Namespace, replicaSet.Name)
-		return err
-	}
+	// replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
+	// if replicaSetOwnerRef == nil {
+	// 	fmt.Printf("ReplicaSet %s/%s has no owner\n", pod.Namespace, replicaSet.Name)
+	// 	return err
+	// }
 
-	deployment, err := clientset.AppsV1().Deployments(pod.Namespace).Get(context.Background(), replicaSetOwnerRef.Name, metav1.GetOptions{})
-	if err != nil {
-		fmt.Printf("Error getting deployment %s/%s: %v\n", pod.Namespace, replicaSetOwnerRef.Name, err)
-		return err
-	}
+	// deployment, err := clientset.AppsV1().Deployments(pod.Namespace).Get(context.Background(), replicaSetOwnerRef.Name, metav1.GetOptions{})
+	// if err != nil {
+	// 	fmt.Printf("Error getting deployment %s/%s: %v\n", pod.Namespace, replicaSetOwnerRef.Name, err)
+	// 	return err
+	// }
+
+	// if deployment.Status.UnavailableReplicas == 0 {
+	// } else {
+	// 	fmt.Printf("Deployment is currently progressing, skipping rollout restart.")
+	// 	return nil
+	// }
 
 	data := fmt.Sprintf(`{"spec": {"template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "%s"}}}}}`, time.Now().Format("20060102150405"))
 	result, err := clientset.AppsV1().Deployments(deployment.Namespace).Patch(context.Background(), deployment.Name, types.StrategicMergePatchType, []byte(data), metav1.PatchOptions{})
@@ -127,17 +134,17 @@ func restartDeployment(clientset *kubernetes.Clientset, pod corev1.Pod) error {
 		return err
 	}
 
-	// Wait for pod to terminate
-	for {
-		_, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-		if err != nil {
-			fmt.Printf("Pod %s/%s has terminated: %v\n", pod.Namespace, pod.Name, err)
-			break
-		} else {
-			fmt.Printf("Pod %s/%s is still running\n", pod.Namespace, pod.Name)
-			time.Sleep(15 * time.Second)
-		}
-	}
+	// // Wait for pod to terminate
+	// for {
+	// 	_, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	// 	if err != nil {
+	// 		fmt.Printf("Pod %s/%s has terminated: %v\n", pod.Namespace, pod.Name, err)
+	// 		break
+	// 	} else {
+	// 		fmt.Printf("Pod %s/%s is still running\n", pod.Namespace, pod.Name)
+	// 		time.Sleep(15 * time.Second)
+	// 	}
+	// }
 
 	return nil
 }

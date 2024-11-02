@@ -81,35 +81,35 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 			}
 			
 
-			nodepoolNodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
-				LabelSelector: nodeLabelNodepoolId + "=" + sksNodepoolId,
-			})
-			if err != nil {
-				fmt.Printf("Error while trying to list nodes: %s", err)
-			}
+			// nodepoolNodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
+			// 	LabelSelector: nodeLabelNodepoolId + "=" + sksNodepoolId,
+			// })
+			// if err != nil {
+			// 	fmt.Printf("Error while trying to list nodes: %s", err)
+			// }
 
-			if err := scaleNodepool(egoclient, ctx, node, sksClusterId, sksNodepoolId); err != nil {
-				fmt.Printf("Error while trying to scale nodepool: %s", err)
-			}
+			// if err := scaleNodepool(egoclient, ctx, node, sksClusterId, sksNodepoolId); err != nil {
+			// 	fmt.Printf("Error while trying to scale nodepool: %s", err)
+			// }
 
-			// Wait until the nodepool has been scaled
-			for {
+			// // Wait until the nodepool has been scaled
+			// for {
 
-				// Check via the Kubernetes API if a new node has been added to the nodepool
-				nodepoolNodesNext, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
-					LabelSelector: nodeLabelNodepoolId + "=" + sksNodepoolId,
-				})
-				if err != nil {
-					fmt.Printf("Error while trying to list nodes: %s", err)
-				}
-				if len(nodepoolNodesNext.Items) > len(nodepoolNodes.Items) {
-					fmt.Printf("Node has been added to the nodepool.\n")
-					break
-				}
+			// 	// Check via the Kubernetes API if a new node has been added to the nodepool
+			// 	nodepoolNodesNext, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
+			// 		LabelSelector: nodeLabelNodepoolId + "=" + sksNodepoolId,
+			// 	})
+			// 	if err != nil {
+			// 		fmt.Printf("Error while trying to list nodes: %s", err)
+			// 	}
+			// 	if len(nodepoolNodesNext.Items) > len(nodepoolNodes.Items) {
+			// 		fmt.Printf("Node has been added to the nodepool.\n")
+			// 		break
+			// 	}
 
-				fmt.Printf("Waiting for a new node to be added to the nodepool. Sleeping for 15 seconds.\n")
-				time.Sleep(15 * time.Second)
-			}
+			// 	fmt.Printf("Waiting for a new node to be added to the nodepool. Sleeping for 15 seconds.\n")
+			// 	time.Sleep(15 * time.Second)
+			// }
 
 			if err := waitNodesReady(clientset); err != nil {
 				fmt.Printf("Error while waiting for nodes to be ready: %s", err)
@@ -128,63 +128,89 @@ Nodes which have job pods running are cordoned, but the eviction is skipped.`,
 				fmt.Printf("Node %s has running jobs, skipping eviction and continuing to next node.\n", node.Name)
 				continue
 			}
-
-			pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
-				FieldSelector: "spec.nodeName=" + node.Name,
-			})
-			if err != nil {
-				panic(err.Error())
-			}
 		
-			for _, pod := range pods.Items {
-				if pod.DeletionTimestamp != nil {
-					fmt.Printf("Pod %s/%s is already terminating\n", pod.Namespace, pod.Name)
-					continue
-				}
+			// Loop over all pods on the node until there are no more reschedulable pods left on the node.
+			// Reschedulable pods are pods which are managed by a Deployment.
+			for {
+				var reschedulablePodsCount int = 0
+				var podsTerminatingCount int = 0
 
-				podOwnerRef := metav1.GetControllerOf(&pod)
-				if podOwnerRef == nil {
-					fmt.Printf("pod %s/%s has no owner", pod.Namespace, pod.Name)
-				} else {
-					if podOwnerRef.Kind == "DaemonSet" {
-						fmt.Printf("Pod %s/%s is managed by a DaemonSet, skipping eviction\n", pod.Namespace, pod.Name)
+				pods, err := clientset.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
+					FieldSelector: "spec.nodeName=" + node.Name,
+				})
+				if err != nil {
+					panic(err.Error())
+				}
+	
+				for _, pod := range pods.Items {
+					if pod.DeletionTimestamp != nil {
+						podsTerminatingCount += 1
+						fmt.Printf("Pod %s/%s is already terminating\n", pod.Namespace, pod.Name)
 						continue
 					}
 
-					if podOwnerRef.Kind == "ReplicaSet" {
-						replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
-						if err != nil {
-							fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
-						}
-					
-						replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
-						if replicaSetOwnerRef.Kind == "Deployment" {
-							if err := restartDeployment(clientset, pod); err != nil {
-								fmt.Printf("Error while restarting deployment: %s", err)
-							}
-
+					podOwnerRef := metav1.GetControllerOf(&pod)
+					if podOwnerRef == nil {
+						fmt.Printf("pod %s/%s has no owner", pod.Namespace, pod.Name)
+					} else {
+						if podOwnerRef.Kind == "DaemonSet" {
+							fmt.Printf("Pod %s/%s is managed by a DaemonSet, skipping eviction\n", pod.Namespace, pod.Name)
 							continue
 						}
+
+						if podOwnerRef.Kind == "ReplicaSet" {
+							replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(context.Background(), podOwnerRef.Name, metav1.GetOptions{})
+							if err != nil {
+								fmt.Printf("Error getting replicaSet %s/%s: %v\n", pod.Namespace, podOwnerRef.Name, err)
+							}
+						
+							replicaSetOwnerRef := metav1.GetControllerOf(replicaSet)
+							if replicaSetOwnerRef.Kind == "Deployment" {
+								reschedulablePodsCount += 1
+
+								deployment, err := clientset.AppsV1().Deployments(pod.Namespace).Get(context.Background(), replicaSetOwnerRef.Name, metav1.GetOptions{})
+								if err != nil {
+									fmt.Printf("Error getting deployment %s/%s: %v\n", pod.Namespace, replicaSetOwnerRef.Name, err)
+								}
+
+								if deployment.Status.UnavailableReplicas == 0 {
+									if err := restartDeployment(clientset, *deployment); err != nil {
+										fmt.Printf("Error while restarting deployment: %s", err)
+									}	
+								} else {
+									fmt.Printf("Deployment %s/%s is currently progressing, skipping rollout restart.\n", deployment.Namespace, deployment.Name)
+								}
+
+								continue
+							}
+						}
+					}
+
+					if err := evictPod(clientset, pod); err != nil {
+						fmt.Printf("Error while evicting pod: %s", err)
 					}
 				}
 
-				if err := evictPod(clientset, pod); err != nil {
-					fmt.Printf("Error while evicting pod: %s", err)
+				if reschedulablePodsCount == 0 && podsTerminatingCount == 0 {
+					break
+				} else {
+					fmt.Println("Not all reschedulable pods have been rescheduled, sleeping for 15 seconds.")
+					time.Sleep(time.Second * 15)
 				}
 			}
 
-			if err := waitPodsRunning(clientset); err != nil {
-				fmt.Printf("Error while waiting for pods to be running: %s", err)
-			}
+			// if err := waitPodsRunning(clientset); err != nil {
+			// 	fmt.Printf("Error while waiting for pods to be running: %s", err)
+			// }
 
 			if err := egoclient.EvictSKSNodepoolMembers(ctx, exoscaleZone, sksCluster, &sksNodepool, []string{node.Status.NodeInfo.SystemUUID}); err != nil {
 				fmt.Printf("Error while evicting node from nodepool: %s", err)
 			}
 			fmt.Printf("Node %s evicted from nodepool %s\n", node.Name, sksNodepoolId)
 
-			if err := waitPodsRunning(clientset); err != nil {
-				fmt.Printf("Error while waiting for pods to be running: %s", err)
-			}
+			// if err := waitPodsRunning(clientset); err != nil {
+			// 	fmt.Printf("Error while waiting for pods to be running: %s", err)
+			// }
 		}
 
 
